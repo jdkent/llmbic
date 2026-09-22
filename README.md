@@ -127,6 +127,34 @@ Three declarations carry most of the weight:
   A record whose context chain comes up empty goes to review rather than to a
   model with nothing to read.
 
+### Asking for more context
+
+Sometimes a step cannot answer with what it was handed — a stored evidence span
+names a stimulus set without saying how it was delivered, and the sentence
+around it does. A recipe can say so:
+
+```python
+ExtractionRecipe(
+    ...,
+    context_policy=ContextPolicy(
+        sequence=(prior_evidence(), sections("methods"), sections("supplement")),
+        full_document_fallback=FallbackMode.FORBIDDEN,
+    ),
+    escalation=EscalationSpec(enabled=True, max_escalations=2),
+)
+```
+
+When the model's answer sets `needs_more_context`, llmbic advances **one
+position down the chain the migration already declared** and asks again. It is
+an ordered walk through permissions that already exist, not a widening of them:
+it stops at the chain's end, at `max_escalations`, and at
+`full_document_fallback`. When the walk runs out, the record goes to review
+carrying the list of what was tried — never an invented value.
+
+Each level is a separate question with its own context, so each is cached
+separately, and a resumed run does not pay again for the insufficient first ask
+on its way back to the answer.
+
 ## What makes a value stale
 
 This is the part that decides whether your corpus is re-read or not, so it is

@@ -228,6 +228,22 @@ phase 4: shadow migrations and alternative-path optimisation are in; batch
 inference, workflow-engine adapters, a service API and distributed execution
 are not.
 
+## Beyond the requirements
+
+Three capabilities the requirements imply but do not name:
+
+| Capability | Where | Tests |
+|---|---|---|
+| **Context escalation** — a step may ask for more context, and llmbic walks the declared chain one position at a time | `recipe.EscalationSpec`, `Engine._ask`, `resolve_context(start_at=...)` | `test_escalation.py` (10 tests) |
+| **Evidence re-anchoring** across a parser change, conservative about ambiguity | `llmbic.reanchor` | `test_reanchor.py` |
+| **Gold-corpus evaluation with rollout gates** as a first-class command | `llmbic.evaluation`, `llmbic evaluate` | `test_evaluation.py` |
+
+Escalation is bounded by `max_escalations`, by the end of the context chain,
+and by `allow_full_document`; when it runs out the record goes to review with
+the list of what was tried. It is closest in spirit to FR-CTX-003's ordered
+fallback and FR-VAL-006's `request-expanded-context`, but driven by the model
+rather than by a curator.
+
 ## 4 Non-goals
 
 All seven hold. Notably: llmbic never decides two differently-worded fields

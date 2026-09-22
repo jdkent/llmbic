@@ -57,6 +57,75 @@ class ConfidenceSpec:
 
 
 @dataclass(frozen=True)
+class EscalationSpec:
+    """Letting a step say the context it was given is not enough.
+
+    The parenthetical case in the brief: a migration may need to *ask* for more
+    context before it can answer.  When a model's structured answer sets
+    ``output_key`` truthy (or abstains, with ``on_unknown``), the engine
+    advances one position down the context chain **the migration already
+    declared** and asks again.
+
+    It never reaches past the chain's end, and never past
+    ``full_document_fallback``.  An escalation is an ordered step through
+    declared permissions, not a widening of them; when the chain runs out, the
+    record goes to review carrying the list of what was tried.
+    """
+
+    enabled: bool = False
+    #: Key in the model's output that means "I need more than this".
+    output_key: str = "needs_more_context"
+    #: Also escalate when the answer abstains with ``status: unknown``.
+    on_unknown: bool = False
+    #: Hard ceiling on how far down the chain one step may walk.
+    max_escalations: int = 2
+
+    def to_canonical(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "output_key": self.output_key,
+            "on_unknown": self.on_unknown,
+            "max_escalations": self.max_escalations,
+        }
+
+    @classmethod
+    def from_canonical(cls, data: Mapping[str, Any]) -> "EscalationSpec":
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            output_key=data.get("output_key", "needs_more_context"),
+            on_unknown=bool(data.get("on_unknown", False)),
+            max_escalations=int(data.get("max_escalations", 2)),
+        )
+
+    def wants_more(self, output: Any) -> bool:
+        """Whether ``output`` is a request for more context rather than an answer."""
+
+        if not self.enabled or not isinstance(output, Mapping):
+            return False
+        if output.get(self.output_key):
+            return True
+        for value in output.values():
+            if not isinstance(value, Mapping):
+                continue
+            if value.get(self.output_key):
+                return True
+            if self.on_unknown and value.get("status") == "unknown":
+                return True
+        return False
+
+    def reason_from(self, output: Any) -> str:
+        """The model's own account of what it is missing, when it gave one."""
+
+        if not isinstance(output, Mapping):
+            return ""
+        for candidate in (output, *(v for v in output.values() if isinstance(v, Mapping))):
+            note = candidate.get("context_request") or candidate.get("reason")
+            if isinstance(note, str) and note:
+                return note
+        return ""
+
+
+@dataclass(frozen=True)
 class ExtractionRecipe:
     """Prompt + model + context + validation + postprocessing, versioned."""
 
@@ -77,6 +146,8 @@ class ExtractionRecipe:
     prompt_builder: str | None = None
     vocabulary_ref: str | None = None
     confidence: ConfidenceSpec = field(default_factory=ConfidenceSpec)
+    #: Whether this recipe may ask for more context, and how it says so.
+    escalation: EscalationSpec = field(default_factory=EscalationSpec)
     #: Structured field values the prompt interpolates, by field id.
     reads_fields: tuple[str, ...] = ()
     description: str = ""
@@ -117,6 +188,7 @@ class ExtractionRecipe:
                 ),
                 "vocabulary_ref": self.vocabulary_ref,
                 "confidence": self.confidence.to_canonical(),
+                "escalation": self.escalation.to_canonical(),
                 "reads_fields": sorted(self.reads_fields),
             }
         )
@@ -151,6 +223,7 @@ class ExtractionRecipe:
             "prompt_builder": self.prompt_builder,
             "vocabulary_ref": self.vocabulary_ref,
             "confidence": self.confidence.to_canonical(),
+            "escalation": self.escalation.to_canonical(),
             "reads_fields": list(self.reads_fields),
             "description": self.description,
         }
@@ -176,6 +249,7 @@ class ExtractionRecipe:
             prompt_builder=data.get("prompt_builder"),
             vocabulary_ref=data.get("vocabulary_ref"),
             confidence=ConfidenceSpec.from_canonical(data.get("confidence") or {}),
+            escalation=EscalationSpec.from_canonical(data.get("escalation") or {}),
             reads_fields=tuple(data.get("reads_fields") or ()),
             description=data.get("description", ""),
         )
@@ -297,6 +371,7 @@ def _load(path: Any, key: str, cls: Any) -> list[Any]:
 
 __all__ = [
     "ConfidenceSpec",
+    "EscalationSpec",
     "ExtractionRecipe",
     "Vocabulary",
     "load_recipes",

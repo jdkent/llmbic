@@ -79,6 +79,10 @@ class ContextResolution:
     blocked_code: str | None = None
     includes_full_document: bool = False
     selector_hashes: tuple[str, ...] = ()
+    #: Index, within the policy's effective sequence, of the last source that
+    #: contributed.  ``None`` when nothing did.  A step asking for more context
+    #: resumes from the next position.
+    used_index: int | None = None
 
     @property
     def n_chars(self) -> int:
@@ -377,12 +381,18 @@ def resolve_context(
     inp: SelectionInput,
     *,
     allow_model_selectors: bool = False,
+    start_at: int = 0,
 ) -> ContextResolution:
     """Walk the fallback chain and return the first satisfying selection.
 
     Never widens silently: the full document is only reachable when the policy
     names it or sets ``full_document_fallback`` to something other than
     ``forbidden`` (FR-CTX-003).
+
+    ``start_at`` skips the first *n* sources.  It is how a step that asked for
+    more context gets it: the engine advances one position down the chain the
+    migration already declared, rather than reaching for anything the policy
+    did not authorise.  The chain's end is still the end.
     """
 
     attempted: list[str] = []
@@ -392,7 +402,7 @@ def resolve_context(
     truncated = False
     includes_full = False
 
-    sequence = policy.effective_sequence
+    sequence = policy.effective_sequence[start_at:]
     if not sequence:
         return ContextResolution(
             satisfied=policy.on_missing_context is OnMissingContext.PROCEED,
@@ -405,7 +415,9 @@ def resolve_context(
             else ErrorCode.CONTEXT_UNAVAILABLE.value,
         )
 
-    for src in sequence:
+    used_index: int | None = None
+    for offset, src in enumerate(sequence):
+        index = start_at + offset
         attempted.append(src.selector_ref)
         if src.kind not in _SELECTORS:
             raise ContextError(
@@ -449,6 +461,7 @@ def resolve_context(
         truncated = truncated or was_truncated
         selector_hashes.append(src.selector_hash())
         used.append(src.selector_ref)
+        used_index = index
         accumulated = kept
 
         if not policy.accumulate and kept:
@@ -460,6 +473,7 @@ def resolve_context(
                 truncated=truncated,
                 includes_full_document=includes_full,
                 selector_hashes=tuple(selector_hashes),
+                used_index=used_index,
             )
         if not policy.accumulate and src.min_units == 0:
             # ``none`` satisfies the policy by design.
@@ -470,6 +484,7 @@ def resolve_context(
                 attempted=tuple(attempted),
                 includes_full_document=False,
                 selector_hashes=tuple(selector_hashes),
+                used_index=used_index,
             )
 
     if accumulated:
@@ -481,6 +496,7 @@ def resolve_context(
             truncated=truncated,
             includes_full_document=includes_full,
             selector_hashes=tuple(selector_hashes),
+            used_index=used_index,
         )
 
     if policy.on_missing_context is OnMissingContext.PROCEED:

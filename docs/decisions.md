@@ -168,7 +168,7 @@ FR-DEP-003, and it is what makes a rename free.
 
 ---
 
-## Two decisions the requirements did not ask for
+## Three decisions the requirements did not ask for
 
 ### In-place transforms are excluded from their own dependency hash
 
@@ -178,6 +178,21 @@ own output and re-run forever. The prior value is recorded in
 `provenance.notes["in_place_inputs"]` instead — auditable, and outside the
 content address. Idempotence (principle 7) wins over completeness of the hash
 in the one case where they conflict.
+
+### A step that asks for more context walks a declared chain, never past it
+
+FR-VAL-006 gives a *curator* the decision `request-expanded-context`. A model
+can want the same thing, and `EscalationSpec` lets a recipe say so. The
+temptation is to let the request widen access; it does not. An escalation
+advances one position down the chain the migration already declared, and stops
+at three ceilings: `max_escalations`, the chain's end, and
+`full_document_fallback` (plus the execution policy's `allow_full_document`).
+When the walk runs out, the record goes to review carrying the list of what was
+tried.
+
+The alternative — letting a model's request reach for the article — would have
+made the context policy advisory, and the whole point of §8.4 is that it is
+not.
 
 ### A step is answerable to the schema it targets
 

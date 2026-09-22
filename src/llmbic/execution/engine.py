@@ -847,42 +847,24 @@ class Engine:
             schema_ref=step_schema.ref,
         )
 
-        cached = self.store.cache_get(key)
-        if cached is not None:
-            self._bump(result, cache_hits=1)
-            payload = cached.payload
-            return self._artifacts_from_output(
-                step, mstep, migration, step_schema, execution_id, recipe,
-                payload["output"], resolution, reads,
-                ModelCall.from_canonical(payload["model_call"]) if payload.get("model_call") else None,
-                parsed, available, cached=True,
-            )
-
-        request = self._build_request(recipe, mstep, step, reads, resolution, step_schema)
-        response, call = self._call_model(
-            recipe, request, step, execution_id, policy, result, resolution
+        selection = SelectionInput(
+            record_id=step.record_id,
+            parsed=parsed,
+            source=source,
+            prior_evidence=evidence_in,
+            prior_fields=reads,
+            field_id=mstep.writes[0] if mstep.writes else None,
+            entity=step.entity,
         )
-
-        output = response.output
-        if recipe.postprocessor:
-            output = POSTPROCESSORS.get(recipe.postprocessor)(output, step, reads)
+        output, call, resolution, from_cache = self._ask(
+            recipe, mstep, step, execution_id, reads, resolution, selection,
+            ctx_policy, step_schema, policy, result, key,
+        )
 
         artifacts = self._artifacts_from_output(
             step, mstep, migration, step_schema, execution_id, recipe, output, resolution,
-            reads, call, parsed, available, cached=False,
+            reads, call, parsed, available, cached=from_cache,
         )
-
-        wrote = self.store.cache_put(
-            CacheEntry(
-                cache_key=key,
-                payload={"output": output, "model_call": call.to_canonical() if call else None},
-                created_at=now(),
-                execution_id=execution_id,
-                usage=response.usage.to_canonical(),
-            )
-        )
-        if wrote:
-            self._bump(result, cache_writes=1)
 
         if recipe.ref in self.shadow:
             self._run_shadow(
@@ -960,6 +942,145 @@ class Engine:
             shadow_recipe=alternative.ref,
             agrees=content_hash(committed) == content_hash(response.output),
         )
+
+    def _ask(
+        self,
+        recipe: ExtractionRecipe,
+        mstep: MigrationStep,
+        step: PlannedStep,
+        execution_id: str,
+        reads: Mapping[str, FieldArtifact],
+        resolution: ContextResolution,
+        selection: SelectionInput,
+        ctx_policy: Any,
+        step_schema: NormalizedSchema,
+        policy: ExecutionPolicy,
+        result: ExecutionResult,
+        key: str,
+    ) -> tuple[Any, ModelCall | None, ContextResolution, bool]:
+        """Ask the model, and let it ask for more context if it needs to.
+
+        This method owns the cache for semantic steps, read and write, because
+        an escalation makes *each level* a separate question: different context
+        means a different cache key.  Caching every level is what keeps a
+        resumed run from paying again for the insufficient first ask on its way
+        back to the answer.
+
+        The walk is bounded three ways: by the recipe's ``max_escalations``, by
+        the end of the chain the migration declared, and by the execution
+        policy, which must still permit the full document if the chain ends
+        there.  When the walk runs out, the record goes to review carrying the
+        list of what was tried — it never receives an invented value.
+        """
+
+        escalation = recipe.escalation
+        tried: list[str] = list(resolution.used_sources)
+        level = 0
+        call: ModelCall | None = None
+
+        while True:
+            from_cache = False
+            cached = self.store.cache_get(key)
+            if cached is not None:
+                self._bump(result, cache_hits=1)
+                output = cached.payload["output"]
+                if cached.payload.get("model_call"):
+                    call = ModelCall.from_canonical(cached.payload["model_call"])
+                from_cache = True
+            else:
+                request = self._build_request(
+                    recipe, mstep, step, reads, resolution, step_schema
+                )
+                response, call = self._call_model(
+                    recipe, request, step, execution_id, policy, result, resolution
+                )
+                output = response.output
+                if recipe.postprocessor:
+                    output = POSTPROCESSORS.get(recipe.postprocessor)(output, step, reads)
+                if self.store.cache_put(
+                    CacheEntry(
+                        cache_key=key,
+                        payload={
+                            "output": output,
+                            "model_call": call.to_canonical() if call else None,
+                        },
+                        created_at=now(),
+                        execution_id=execution_id,
+                        usage=response.usage.to_canonical(),
+                    )
+                ):
+                    self._bump(result, cache_writes=1)
+
+            if not escalation.wants_more(output):
+                return output, call, resolution, from_cache
+
+            note = escalation.reason_from(output)
+            next_at = (resolution.used_index or 0) + 1
+            exhausted = (
+                level >= escalation.max_escalations
+                or next_at >= len(ctx_policy.effective_sequence)
+            )
+            self.store.put_attempt(
+                execution_id,
+                step.key,
+                {
+                    "step_key": step.key,
+                    "record_id": step.record_id,
+                    "outcome": "context_requested",
+                    "level": level,
+                    "tried": list(tried),
+                    "note": note,
+                    "from_cache": from_cache,
+                    "exhausted": exhausted,
+                },
+            )
+            emit(
+                self.on_event,
+                "step.context_requested",
+                execution_id=execution_id,
+                record_id=step.record_id,
+                step=step.key,
+                level=level,
+                tried=list(tried),
+                exhausted=exhausted,
+            )
+            if exhausted:
+                raise _ReviewNeeded(
+                    f"{recipe.ref} asked for more context than its policy provides; "
+                    f"tried {', '.join(tried) or 'nothing'}"
+                    + (f" ({note})" if note else "")
+                )
+
+            wider = resolve_context(
+                ctx_policy,
+                selection,
+                allow_model_selectors=policy.allow_model_selectors,
+                start_at=next_at,
+            )
+            if not wider.satisfied or not wider.units:
+                raise _ReviewNeeded(
+                    f"{recipe.ref} asked for more context and the chain has none left; "
+                    f"tried {', '.join(tried) or 'nothing'}"
+                )
+            if wider.includes_full_document and not policy.allow_full_document:
+                raise PolicyError(
+                    "the step asked for more context and the next source is the full "
+                    "document, which the execution policy does not permit",
+                    code=ErrorCode.CONTEXT_POLICY_FORBIDS,
+                )
+
+            resolution = wider
+            tried.extend(wider.used_sources)
+            level += 1
+            key = cache_key(
+                step=mstep,
+                record_id=step.record_id,
+                entity=step.entity,
+                field_ids=mstep.writes,
+                dependencies=step.dependencies,
+                context_hash=resolution.context_hash(),
+                schema_ref=step_schema.ref,
+            )
 
     def _build_request(
         self,

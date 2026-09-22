@@ -106,7 +106,7 @@ from .provenance import (
     entity_key,
 )
 from .reanchor import AnchorOutcome, reanchor_artifacts, reanchor_evidence
-from .recipe import ConfidenceSpec, ExtractionRecipe, Vocabulary
+from .recipe import ConfidenceSpec, EscalationSpec, ExtractionRecipe, Vocabulary
 from .records import ExtractedValueCodec, PlainCodec, assemble, decompose
 from .registry import PathPreference, Registry, SchemaFamily
 from .review import ReviewQueue
@@ -155,6 +155,7 @@ __all__ = [
     "Engine",
     "EvaluationReport",
     "ErrorCode",
+    "EscalationSpec",
     "EvaluationReport",
     "FieldScore",
     "GoldCorpus",
