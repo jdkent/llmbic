@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmbic"
+version = "0.1.0"
+description = "Semantic schema migration for LLM-extracted records: an Alembic-like migration layer for schema-driven information extraction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "neurostuff" }]
+keywords = ["schema", "migration", "llm", "extraction", "provenance", "lineage"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Intended Audience :: Science/Research",
+  "Topic :: Database",
+]
+dependencies = [
+  "pydantic>=2.5",
+  "click>=8.1",
+  "PyYAML>=6.0",
+  "jsonschema>=4.20",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4", "hypothesis>=6.90"]
+otel = ["opentelemetry-api>=1.20"]
+
+[project.scripts]
+llmbic = "llmbic.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+llmbic = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:llmbic.*"]
